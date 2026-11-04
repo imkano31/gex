@@ -3,6 +3,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from scipy.stats import norm
+import plotly.graph_objects as go
 
 st.set_page_config(page_title="GEX Terminal", page_icon="📊", layout="wide")
 st.title("📊 GEX Intraday Terminal (Bao gồm NQ Futures)")
@@ -19,7 +20,6 @@ if st.button("Tạo Plan Đầu Ngày"):
         ticker = yf.Ticker(symbol)
         nq_ticker = yf.Ticker("NQ=F")
         
-        # Lấy giá hiện tại
         try:
             spot_price = ticker.fast_info['lastPrice']
         except:
@@ -30,7 +30,6 @@ if st.button("Tạo Plan Đầu Ngày"):
         except:
             nq_spot = nq_ticker.history(period="1d")['Close'].iloc[-1]
             
-        # Tính hệ số
         ratio = nq_spot / spot_price
             
         expirations = ticker.options
@@ -48,7 +47,7 @@ if st.button("Tạo Plan Đầu Ngày"):
             puts['gamma'] = puts.apply(lambda row: black_scholes_gamma(spot_price, row['strike'], T, r, max(row['impliedVolatility'], 0.01)), axis=1)
             puts['gex'] = puts['openInterest'] * puts['gamma'] * 100 * spot_price * -1 / 1e6
 
-            # Lọc biên độ +/- 7% để tìm đúng cản gần nhất
+            # Lọc biên độ +/- 7%
             lower_bound = spot_price * 0.93
             upper_bound = spot_price * 1.07
             calls_near = calls[(calls['strike'] >= lower_bound) & (calls['strike'] <= upper_bound)]
@@ -61,8 +60,8 @@ if st.button("Tạo Plan Đầu Ngày"):
                 call_wall = calls.loc[calls['gex'].idxmax()]['strike']
                 put_wall = puts.loc[puts['gex'].idxmin()]['strike']
 
-            df_calls = calls[['strike', 'gex']].rename(columns={'gex': 'call_gex'})
-            df_puts = puts[['strike', 'gex']].rename(columns={'gex': 'put_gex'})
+            df_calls = calls_near[['strike', 'gex']].rename(columns={'gex': 'call_gex'})
+            df_puts = puts_near[['strike', 'gex']].rename(columns={'gex': 'put_gex'})
             merged = pd.merge(df_calls, df_puts, on='strike', how='outer').fillna(0)
             merged['net_gex'] = merged['call_gex'] + merged['put_gex']
             
@@ -75,14 +74,34 @@ if st.button("Tạo Plan Đầu Ngày"):
                     gamma_flip = (near_spot.iloc[i]['strike'] + near_spot.iloc[i+1]['strike']) / 2
                     break
 
-            # Quy đổi sang NQ
             call_wall_nq = call_wall * ratio
             put_wall_nq = put_wall * ratio
             gamma_flip_nq = gamma_flip * ratio
 
-            # HIỂN THỊ LÊN WEB
-            st.success(f"Dữ liệu chốt tại kỳ hạn: {target_exp} | Hệ số quy đổi Ratio (NQ chia QQQ): {ratio:.2f}")
+            st.success(f"Dữ liệu chốt tại kỳ hạn: {target_exp} | Hệ số quy đổi Ratio: {ratio:.2f}")
             
+            # --- VẼ BIỂU ĐỒ GEX PROFILE ---
+            st.markdown("### 📈 Biểu đồ GEX Profile")
+            fig = go.Figure()
+            # Cột Call GEX (Màu xanh hướng lên)
+            fig.add_trace(go.Bar(x=merged['strike'], y=merged['call_gex'], name='Call GEX', marker_color='#00ff00'))
+            # Cột Put GEX (Màu đỏ/hồng hướng xuống)
+            fig.add_trace(go.Bar(x=merged['strike'], y=merged['put_gex'], name='Put GEX', marker_color='#ff007f'))
+            
+            # Kẻ vạch Spot Price
+            fig.add_vline(x=spot_price, line_dash="dash", line_color="white", annotation_text="Giá Spot Hiện Tại", annotation_position="top left")
+            
+            fig.update_layout(
+                barmode='relative',
+                template='plotly_dark',
+                xaxis_title="Strike Price",
+                yaxis_title="Gamma Exposure (Triệu USD)",
+                hovermode="x unified",
+                margin=dict(l=20, r=20, t=40, b=20)
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            # -------------------------------
+
             st.markdown("### 🎯 ĐỐI CHIẾU MỐC GEX: QQQ vs NQ FUTURES")
             
             col1, col2, col3 = st.columns(3)
