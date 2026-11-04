@@ -4,26 +4,34 @@ import pandas as pd
 import numpy as np
 from scipy.stats import norm
 
-# Cấu hình giao diện Web
 st.set_page_config(page_title="GEX Terminal", page_icon="📊", layout="wide")
-st.title("📊 GEX Intraday Terminal")
+st.title("📊 GEX Intraday Terminal (Bao gồm NQ Futures)")
 
 def black_scholes_gamma(S, K, T, r, sigma):
     if T <= 0 or sigma <= 0: return 0.0
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     return norm.pdf(d1) / (S * sigma * np.sqrt(T))
 
-# Ô nhập mã
-symbol = st.text_input("Nhập mã (VD: QQQ, SPY, AAPL):", "QQQ").upper()
+symbol = st.text_input("Nhập mã cơ sở (Khuyên dùng: QQQ để tính cho NQ):", "QQQ").upper()
 
 if st.button("Tạo Plan Đầu Ngày"):
-    with st.spinner(f'Đang kéo dữ liệu {symbol} từ Wall Street...'):
+    with st.spinner(f'Đang kéo dữ liệu {symbol} và NQ=F từ Wall Street...'):
         ticker = yf.Ticker(symbol)
+        nq_ticker = yf.Ticker("NQ=F")
         
+        # Lấy giá hiện tại
         try:
             spot_price = ticker.fast_info['lastPrice']
         except:
             spot_price = ticker.history(period="1d")['Close'].iloc[-1]
+            
+        try:
+            nq_spot = nq_ticker.fast_info['lastPrice']
+        except:
+            nq_spot = nq_ticker.history(period="1d")['Close'].iloc[-1]
+            
+        # Tính hệ số
+        ratio = nq_spot / spot_price
             
         expirations = ticker.options
         if not expirations:
@@ -40,8 +48,18 @@ if st.button("Tạo Plan Đầu Ngày"):
             puts['gamma'] = puts.apply(lambda row: black_scholes_gamma(spot_price, row['strike'], T, r, max(row['impliedVolatility'], 0.01)), axis=1)
             puts['gex'] = puts['openInterest'] * puts['gamma'] * 100 * spot_price * -1 / 1e6
 
-            call_wall = calls.loc[calls['gex'].idxmax()]['strike']
-            put_wall = puts.loc[puts['gex'].idxmin()]['strike']
+            # Lọc biên độ +/- 7% để tìm đúng cản gần nhất
+            lower_bound = spot_price * 0.93
+            upper_bound = spot_price * 1.07
+            calls_near = calls[(calls['strike'] >= lower_bound) & (calls['strike'] <= upper_bound)]
+            puts_near = puts[(puts['strike'] >= lower_bound) & (puts['strike'] <= upper_bound)]
+
+            if not calls_near.empty and not puts_near.empty:
+                call_wall = calls_near.loc[calls_near['gex'].idxmax()]['strike']
+                put_wall = puts_near.loc[puts_near['gex'].idxmin()]['strike']
+            else:
+                call_wall = calls.loc[calls['gex'].idxmax()]['strike']
+                put_wall = puts.loc[puts['gex'].idxmin()]['strike']
 
             df_calls = calls[['strike', 'gex']].rename(columns={'gex': 'call_gex'})
             df_puts = puts[['strike', 'gex']].rename(columns={'gex': 'put_gex'})
@@ -57,17 +75,37 @@ if st.button("Tạo Plan Đầu Ngày"):
                     gamma_flip = (near_spot.iloc[i]['strike'] + near_spot.iloc[i+1]['strike']) / 2
                     break
 
+            # Quy đổi sang NQ
+            call_wall_nq = call_wall * ratio
+            put_wall_nq = put_wall * ratio
+            gamma_flip_nq = gamma_flip * ratio
+
             # HIỂN THỊ LÊN WEB
-            st.success(f"Dữ liệu chốt tại kỳ hạn: {target_exp}")
+            st.success(f"Dữ liệu chốt tại kỳ hạn: {target_exp} | Hệ số quy đổi Ratio (NQ chia QQQ): {ratio:.2f}")
             
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Giá Spot (Close)", f"{spot_price:.2f}")
-            col2.metric("Call Wall (Cản)", f"{call_wall:.2f}")
-            col3.metric("Gamma Flip", f"{gamma_flip:.2f}")
-            col4.metric("Put Wall (Hỗ trợ)", f"{put_wall:.2f}")
+            st.markdown("### 🎯 ĐỐI CHIẾU MỐC GEX: QQQ vs NQ FUTURES")
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.markdown("**MỐC GEX (LEVELS)**")
+                st.info("Call Wall (Cản trên)")
+                st.warning("Gamma Flip (Pivot)")
+                st.error("Put Wall (Hỗ trợ dưới)")
+                
+            with col2:
+                st.markdown(f"**{symbol} (Spot: {spot_price:.2f})**")
+                st.info(f"**{call_wall:.2f}**")
+                st.warning(f"**{gamma_flip:.2f}**")
+                st.error(f"**{put_wall:.2f}**")
+                
+            with col3:
+                st.markdown(f"**NQ FUTURES (Giá: {nq_spot:.2f})**")
+                st.info(f"**{call_wall_nq:.2f}**")
+                st.warning(f"**{gamma_flip_nq:.2f}**")
+                st.error(f"**{put_wall_nq:.2f}**")
 
             st.divider()
-            st.subheader("📝 Kịch Bản Intraday")
-            st.info(f"**1. Neutral (Base Case):** Dao động tích lũy giữa {put_wall:.2f} và {call_wall:.2f}.")
-            st.success(f"**2. Bull Branch:** Bứt phá & giữ vững trên {gamma_flip:.2f} -> Hướng về Call Wall {call_wall:.2f}.")
-            st.error(f"**3. Bear Branch:** Mất mốc {gamma_flip:.2f} -> Trượt nhanh về Put Wall {put_wall:.2f}.")
+            st.subheader("📝 Kịch Bản Trade Intraday cho NQ Futures")
+            st.info(f"**1. Neutral (Base Case):** NQ đi ngang (ping-pong) trong biên độ {put_wall_nq:.2f} và {call_wall_nq:.2f}.")
+            st.success(f"**2. Bull Branch:** NQ bứt phá & giữ vững trên mốc Pivot {gamma_flip_nq:.2f} -> Đánh Long nhắm tới {call_wall_nq:.2f}.")
+            st.error(f"**3. Bear Branch:** NQ gãy mốc Pivot {gamma_flip_nq:.2f} -> Đánh Short ép giá về {put_wall_nq:.2f}.")
